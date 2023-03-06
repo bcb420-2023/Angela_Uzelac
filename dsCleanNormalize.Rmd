@@ -1,0 +1,273 @@
+---
+title: "RNASeq Data Exploration, Normalization, and Identifier Mapping"
+subtitle: "DNA methylation in neurons from post-mortem brains in schizophrenia and bipolar disorder"
+author: "Angela Uzelac"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+bibliography:
+  bibliography.bib
+---
+
+# Introduction
+
+A dopamine imbalance in the human brain is one of the factors central to the pathogenesis of major psychosis. A study done by Pai et al. suggests that epigenetic changes may increase dopamine synthesis and result in psychotic symptoms. Psychosis is a typical symptom observed in patients with Schizophrenia and Bipolar disease. Furthermore, abnormal DNA methylation has been detected in patients with Schizophrenia and bipolar disorder. One of the important experiments performed in this paper was profiling the transcriptomes of neuronal nuclei samples from post-mortem frontal cortex of individuals diagnosed with Schizophrenia or Bipolar disease, as well as controls. Sequencing was done using High-throughput RNASeq. The purpose of this experiment was to determine the consequences of altered DNA methylation in major psychosis[@pai2019differential].
+
+With a future goal of investigating the differential expression across these genes, the purpose of this study was to gather the existing raw expression data, clean it up, normalize it, and convert to HGNC symbols since it is from human samples. All of these will set up this data to be easy to work with for future analyses. It is worthy to note that an expression dataset that was sequenced using Bulk RNASeq method was chosen because it provides good coverage of the sequences without taking up too much space on a computer.
+
+This dataset was chosen as I am really interested in neuroscience and mental health, as well as epigenetics. A few years ago I learned that Schizophrenia has a genetic link, and since then I have wanted to study how it can arise and eventually find some potential therapeutics. The associated study was also easy to understand and was not a very big learning curve to understand how the experiment relates to the broader study.
+
+
+## Initial set-up
+
+Once the dataset GSE112523 was chosen, it was retrieved from GEO using the getGEO function from the R package GEOquery.
+
+```{r message=FALSE}
+# platform info
+
+library(GEOquery)
+
+gse <- getGEO("GSE112523", GSEMatrix = FALSE, getGPL= TRUE)
+gpl <- names(GPLList(gse))[1]
+gpl_info <- Meta(getGEO(gpl))
+```
+
+# Information about the platform GPL18573
+
+Platform: `r gpl_info$title`
+
+Submission Date: `r gpl_info$submission_date`
+
+Last Updated: `r gpl_info$last_update_date`
+
+Organism: `r gpl_info$organism`
+
+Number of GEO datasets that use this technology: `r length(gpl_info$series_id)`
+
+Number of GEO samples that use this technology: `r length(gpl_info$sample_id)`
+
+
+# Procedure and Results
+
+## Downloading the raw expression data
+
+First, gene count data was retrieved from the supplementary file provided in the GEO database, and read into an R dataframe object. Then, the total number of genes in the file was calculated. 
+
+```{r message=FALSE}
+# get supplementary file from GEO
+supp_files <- GEOquery::getGEOSuppFiles("GSE112523")
+filenames <- rownames(supp_files)
+# One supplemental file
+# read supplementary file into dataframe
+GSE112523 <- read.delim(filenames[1], sep = ",", header = TRUE, check.names = FALSE)
+
+num_genes <- dim(GSE112523)[1]
+
+```
+
+Number of genes in the raw data: `r num_genes`
+
+
+## Defining groups in the data
+
+Since the goal of the experiment is to compare DNA methylation in neurons of individuals with a psychotic disorder (schizophrenia and bipolar) to those in undiagnosed individuals, the data was grouped into 2 groups: disease and control. As per the paper, there are 17 control samples and 17 case (disease) samples.
+
+```{r}
+#split data into 2 groups, control and disease
+
+samples <- data.frame(lapply(colnames(GSE112523)[2:35], 
+        FUN=function(x){unlist(strsplit(x, 
+                        split = "_"))[c(1, 2)]}))
+colnames(samples) <- colnames(GSE112523)[2:35]
+rownames(samples) <- c("condition", "sample")
+samples <- data.frame(t(samples))
+
+samples$condition[which(grepl("^BIPOL", samples$condition))] <- "CASE"
+samples$condition[which(grepl("^SCZ", samples$condition))] <- "CASE"
+
+```
+
+
+## Cleaning up duplicates
+
+It was noticed that the number of genes in the raw data is far too large and is not biologically accurate. So, after some examination, it was noticed that some of the genes in the raw expression data appear more than once, and there are genes that are very weakly expressed and do not provide much information for the analysis. By removing the weakly expressed genes, the duplicate records were also removed, and the number of genes was brought down to a more reasonable and biologically possible number. The edgeR package protocol was followed such that genes with less than 1 read per million out of 17 samples are removed. Since there are 17 controls and 17 disease replicates, the lowest number of replicates is 17. 
+
+```{r}
+# calculate number of duplicated genes
+length(GSE112523[duplicated(GSE112523[,1]), 1])
+
+# convert counts into counts per million
+cpms <- edgeR::cpm(GSE112523[,2:35])
+rownames(cpms) <- GSE112523[,1]
+# get rid of genes that have low counts
+# genes that have less than 1 read per million in 17 samples
+sel <- rowSums(cpms > 1) >= 17
+GSE112523_filtered <- GSE112523[sel,]
+# now have 18079 genes, this is more realistic
+
+#calculate number of duplicated genes after filtering
+length(GSE112523_filtered[duplicated(GSE112523_filtered[,1]), 1])
+```
+
+As the number of duplicated genes was reduced from 45 to 0, and the number of genes has decreased to `r nrow(GSE112523_filtered)`, it is clear that we have cleaner and more realistic data.
+
+## Normalization
+
+This study must account for numerous possibilities of technical variation in order to properly investigate the biological variation, i.e. the differential expression. First, the data was analyzed to determine what method of normalization is best to use, then a normalization method was applied and the differences were visualized.
+
+### Analysis
+
+First, the distribution of the data was visualized using a boxplot.
+
+```{r warning=FALSE}
+# calculate the log of the counts per million and plot
+logcpm <- log2(edgeR::cpm(GSE112523_filtered[,2:35]))
+boxplot(logcpm, xlab = "Samples", ylab = "log2 CPM",
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "DNA Methylation RNASeq Samples")
+```
+
+Most of the sample medians are close to the median line, showing some slight technical variation.
+
+
+Next, a density function of the samples was plotted. 
+
+```{r}
+# applies probability density function over columns (conditions) of log2 cpm values of the gene expression data
+# the density across all genes for each sample
+counts_density <- apply(logcpm, 2, density)
+
+# calculate the limits across all the samples
+xlim <- 0
+ylim <- 0
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x)); 
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+# all line types to be solid (1)
+line_type <- rep(1, length(counts_density))
+# initialize the plot
+plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+     ylab="Density of log2-CPM", 
+     main="", cex.lab = 0.85)
+# plot each line
+for (i in 1:length(counts_density)) {
+  lines(counts_density[[i]], col=cols[i], lty=line_type[i])
+}
+# add a legend
+legend("topright", colnames(logcpm),  
+       col=cols, lty=line_type, cex=0.5, 
+       border ="blue",  text.col = "green4", 
+       merge = TRUE, bg = "gray90")
+```
+
+From these two graphs, it is clear that the technical variation affected the disease and control samples in the same way. Therefore, normalization can be done by equilibrating expression levels from the non-differentially expressed genes. Since the exact expression levels and lengths of every gene are not known, it is not possible to estimate RNA production directly. However, a global fold change can be determined. The TMM strategy equates the overall expression levels of two samples under the assumption that most genes are not differentially expressed [@evans2018selecting]. Essentially, the ratio between expression levels is looked at. Consequently, the TMM normalization method was used.
+
+
+### Normalization
+
+The data was normalized using the TMM method by applying several edgeR package functions. The function calcNormFactors normalizes the counts across the genes for each sample, which minimizes the log-fold changes between the samples. The results of the normalization were visualized in an MDS plot that shows the distances between samples.
+
+```{r}
+#convert filtered data to matrix
+data_as_matrix <- as.matrix(GSE112523_filtered[,2:35])
+rownames(data_as_matrix) <- GSE112523_filtered[,1]
+# convert to DGEList object so that the data can be used in further analyses using edgeR functions
+dge <- edgeR::DGEList(counts=data_as_matrix, group=samples$condition)
+# normalize the library size using TMM
+dge_norm_fact <- edgeR::calcNormFactors(dge)
+normalized_counts <- edgeR::cpm(dge_norm_fact)
+# visualize sample separation by condition
+limma::plotMDS(dge_norm_fact, labels=rownames(samples), col = c("blue", "red")[factor(samples$condition)])
+```
+
+
+Next, the variance of the sample from the mean is shown in a BCV plot. The common dispersion value for all genes is shown in red, the gene-specific dispersion is shown as black dots, and the general trend of variance is shown in blue. From this graph, it is clear that the genes with low expression have a high degree of variance, and as there is more expression, there is less variation between samples.
+
+```{r}
+# calculate dispersion
+model_design <- model.matrix(~samples$condition)
+disp <- edgeR::estimateDisp(dge_norm_fact, model_design)
+# visualize the variation in the samples
+edgeR::plotBCV(disp,col.tagwise = "black",col.common = "red")
+
+```
+
+## Identifier Mapping
+
+Finally, the biomaRt package was used to convert the Ensembl gene IDs to HUGO symbols. A conversion stash was utilized to store the data retrieved from Ensembl Biomart so that the data does not have to be retrieved everytime if we already retrieved it. In the retrieval of the HGNC IDs, Ensembl gene IDs were used as the filter, and the desired attributes to be returned were Ensembl gene IDs and HGNC symbols. The table containing the mapped genes was then merged to the table of existing normalized expression counts.
+
+```{r message=FALSE}
+
+library(biomaRt)
+
+# define which mart to use
+ensembl <- useMart("ensembl")
+# define which dataset to use
+ensembl <- useDataset("hsapiens_gene_ensembl",mart=ensembl)
+
+# store the conversion data so that the data does not have to be retrieved from Ensembl if it already exists
+conversion_stash <- "GSE112523_id_conversion.rds"
+if(file.exists(conversion_stash)){
+  GSE112523_id_conversion <- readRDS(conversion_stash)
+} else {
+  GSE112523_id_conversion <- getBM(attributes = c("ensembl_gene_id","hgnc_symbol"),
+                            filters = c("ensembl_gene_id"),
+                            values = GSE112523_filtered[,1],
+                            mart = ensembl)
+  saveRDS(GSE112523_id_conversion, conversion_stash)
+}
+
+# merge table of normalized data with table of converted IDs
+data_with_hgnc <- merge(GSE112523_id_conversion, normalized_counts, by.x = 1, by.y = 0, all.y = TRUE)
+data_with_hgnc[c(1:5), c(1:5)]
+```
+
+### Analyzing success of ID mapping
+
+To determine the success of the ID mapping, the proportion of genes that were not mapped to HUGO symbols was calculated. Since only about 10% of ensembl genes were not mapped, they were removed from the data.
+
+```{r}
+# get ensembl ids that did not match to a HGNC symbol
+ensembl_id_missing_hgnc <- data_with_hgnc$ensembl_gene_id[nchar(data_with_hgnc$hgnc_symbol) < 1 | is.na(data_with_hgnc$hgnc_symbol)]
+
+# calculate the percentage of genes that did not map to HGNC symbols
+num_missing = length(ensembl_id_missing_hgnc)
+percent_missing = (num_missing/nrow(data_with_hgnc))*100
+# 10.17%
+
+# remove genes that did not map
+data_with_hgnc <- data_with_hgnc[!(data_with_hgnc$ensembl_gene_id %in% ensembl_id_missing_hgnc), ]
+```
+
+Number of genes remaining in the data: `r nrow(data_with_hgnc)`
+
+Next, the number of genes that mapped to more than one HGNC symbol was calculated.
+
+```{r}
+# identify ensembl genes that mapped to more than 1 HGNC symbol
+nrow(data_with_hgnc[duplicated(data_with_hgnc$ensembl_gene_id), c(1:2)])
+
+duplicated_ensembl_id <- data_with_hgnc$ensembl_gene_id[duplicated(data_with_hgnc$ensembl_gene_id)]
+data_with_hgnc[data_with_hgnc$ensembl_gene_id == duplicated_ensembl_id, c(1,2)]
+```
+
+It was discovered that only one Ensembl ID mapped to more than one HGNC symbol. Upon further searching in NCBI, it was determined that the different human genes were splice variants, as they had the same gene name (long intergenic non-protein coding RNA), they were on the same locus, but one of them has 2 exons and other has 3 exons.
+
+
+Next, the number of genes that mapped to the same HGNC symbol was calculated, and it was found that there were no duplicated HGNC symbols.
+
+```{r}
+# identify ensembl genes that mapped to the same HGNC symbol
+nrow(data_with_hgnc[duplicated(data_with_hgnc$hgnc_symbol), c(1:2)])
+```
+
+
+# Conclusion
+
+The final number of genes left in the data is `r nrow(data_with_hgnc)`. This is a much cleaner set of expression values that do not contain duplicates or weakly expressed genes and are all mapped to HGNC symbols. The data was also normalized to account for technical variation. This data is ready for further processing and differential expression analysis.
+
+
