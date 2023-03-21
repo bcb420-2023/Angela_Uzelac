@@ -1,0 +1,347 @@
+---
+title: "Differential Gene Expression and Over-Representation Analysis"
+subtitle: "DNA methylation in neurons from post-mortem brains in schizophrenia and bipolar disorder"
+author: "Angela Uzelac"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+bibliography:
+  bibliography2.bib
+---
+
+# Introduction
+
+A dopamine imbalance in the human brain is one of the factors central to the pathogenesis of major psychosis. A study done by Pai et al. suggests that epigenetic changes may increase dopamine synthesis and result in psychotic symptoms. Psychosis is a typical symptom observed in patients with Schizophrenia and Bipolar disease. Furthermore, abnormal DNA methylation has been detected in patients with Schizophrenia and bipolar disorder. One of the important experiments performed in this paper was profiling the transcriptomes of neuronal nuclei samples from post-mortem frontal cortex of individuals diagnosed with Schizophrenia and Bipolar disease, as well as controls. Sequencing was done using High-throughput RNASeq. The purpose of this experiment was to determine the consequences of altered DNA methylation in major psychosis [@pai2019differential].
+
+In the previous study, the dataset was chosen and the raw mRNA expression data was gathered from GEO, cleaned up, normalized, and the gene identifiers were converted to HUGO symbols in preparation for the following investigation. The raw data contained expression counts for 58219 genes. First, duplicate genes and genes with low counts were eliminated, then the data was normalized to account for technical variation. This reduced the number of genes to 18079 and got rid of 100% of the duplicates. After mapping the Ensembl gene identifiers to HGNC symbols, the number of genes were brought down to a much more reasonable number: 16240. Approximately 10% of the genes were not mapped, however, due to the low proportion, these genes were omitted from the study. 
+
+The purpose of the following investigation was to identify the significantly differentially expressed genes from the set obtained in the previous work, then rank them according to their differential expression, and finally perform a thresholded gene set enrichment analysis in order to determine the prominent themes in the gene set.
+
+
+Chosen GEO dataset: [GSE112523](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE112523)
+
+Associated paper: [Differential methylation of enhancer at IGF2 is associated with abnormal dopamine synthesis in major psychosis](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6499808/)
+
+
+# Procedure and Results
+
+## Differential Gene Expression Analysis
+
+The first step of the analysis was loading the normalized and cleaned up RNA expression data from the previous study. There was one duplicate gene leftover which resulted from mapping as one of the Ensembl IDs mapped to two different HGNC symbols. Further investigation of the two HGNC symbols, [LINC00595](https://www.ncbi.nlm.nih.gov/gene/?term=LINC00595) and [LINC00856](https://www.ncbi.nlm.nih.gov/gene/?term=LINC00856), on NCBI, revealed that they are splice variants. LINC00595 was kept due to the fact that it has 3 exons whereas LINC00856 has 2 exons. This finally resulted in the 16239 genes that were used for the remainder of this study.
+
+```{r}
+# load the normalized and cleaned up data from a file
+normalized_count_data <- read.table(file=file.path("./GSE112523_normalized.tsv"),
+                                    header = TRUE,sep = "\t",
+                                    stringsAsFactors = FALSE,
+                                    check.names=FALSE)
+
+# eliminate the duplicate gene that resulted from identifier mapping
+normalized_count_data <- normalized_count_data[normalized_count_data$hgnc_symbol != "LINC00856", ]
+
+# create a matrix containing only the numerical expression data
+trial_expression_matrix <- normalized_count_data[,3:ncol(normalized_count_data)]
+rownames(trial_expression_matrix) <- normalized_count_data$ensembl_gene_id
+colnames(trial_expression_matrix) <- colnames(normalized_count_data[, 3:ncol(normalized_count_data)])
+
+```
+
+
+In order to determine how the model was going to be designed, an MDS plot [@limma2015] was created to visualize the distribution of the samples.
+
+
+```{r}
+# divide samples into control and disease
+trial_samples <- data.frame(lapply(colnames(normalized_count_data)[3:ncol(normalized_count_data)], 
+                             FUN=function(x){unlist(strsplit(x, 
+                                                             split = "_"))[c(1, 2)]}))
+colnames(trial_samples) <- colnames(normalized_count_data)[3:ncol(normalized_count_data)]
+rownames(trial_samples) <- c("condition", "sample")
+trial_samples <- data.frame(t(trial_samples))
+
+trial_samples$condition[which(grepl("^BIPOL", trial_samples$condition))] <- "DISEASE"
+trial_samples$condition[which(grepl("^SCZ", trial_samples$condition))] <- "DISEASE"
+
+# convert to DGEList object so that the data can be used in further analyses using edgeR functions
+dge <- edgeR::DGEList(counts = trial_expression_matrix, group = trial_samples$condition)
+# normalize the library size using TMM
+dge_norm_fact <- edgeR::calcNormFactors(dge)
+# visualize sample separation by condition
+limma::plotMDS(dge_norm_fact, labels=rownames(trial_samples), col = c("blue", "red")[factor(trial_samples$condition)], cex = 0.7)
+legend("topright",legend=c("Control Samples","Disease Samples"), fill=c("blue", "red"),cex = 0.5)
+```
+
+Figure 1. MDS plot showing the separation of samples in the expression dataset by condition (bipolar, schizophrenia, and control). Sample names written in blue are control samples, and sample names in red are disease samples. 
+
+Since the Bipolar samples are more scattered, it was predicted that this would give less accurate results with a lot of noise. Therefore, it was eliminated from the analysis in order to focus on the difference in expression between the control samples and the schizophrenia samples. Additionally, there is no obvious association between samples so there will only be 1 factor in the model design: condition.
+
+```{r}
+normalized_count_data <- normalized_count_data[, grep(colnames(normalized_count_data), pattern="^[^B]")]
+```
+
+
+To begin, the regulation of only the gene of interest was investigated. Since the original paper looked at how hypomethylation of the enhancer at the IGF2 locus affects the development of psychotic behaviour in patients with Schizophrenia and Bipolar disorder, the differential expression of IGF2 was analyzed separately. The data was grouped into control samples and schizophrenia samples for the gene of interest, then a t-test was performed to determine whether there is a significant difference in expression between the two groups of samples. For the purpose of this investigation, the schizophrenia data will also be referred to as "disease" data throughout this report.
+
+
+```{r}
+# divide the data by columns for control samples and for disease samples
+ctrl_samples <- grep(colnames(normalized_count_data),
+                      pattern="^CTRL")
+disease_samples <- grep(colnames(normalized_count_data),
+                          pattern="^SCZ")
+# take only the row of expression values for the gene of interest IGF2
+igf2_expr_data <- normalized_count_data$hgnc_symbol == "IGF2"
+
+# get control and disease sample counts only for IGF2
+igf2_ctrl <- normalized_count_data[igf2_expr_data, ctrl_samples]
+igf2_disease <- normalized_count_data[igf2_expr_data, disease_samples]
+
+# perform a t-test to compare the mean of the control sample versus the mean of the disease sample
+igf2_pvalue <- t.test(x=igf2_ctrl,y=igf2_disease)$p.value
+```
+
+P-value from t-test: `r igf2_pvalue`
+
+Since the p-value obtained from the t-test is greater than the threshold of 0.05, the results are consistent with the null hypothesis and, therefore, it can be concluded that there is no difference in expression of IGF2 in the control samples compared to the disease samples.
+
+### Multiple hypothesis testing
+
+It is important to account for the fact that there are many genes in this dataset which increases the likelihood of detecting significant expression simply due to chance. Multiple hypothesis testing controls for the random chance that genes will come out as significant as the number of tests increases. 
+
+
+```{r}
+# create a linear model
+# divide samples into control and disease, this time without the Bipolar samples
+samples <- data.frame(lapply(colnames(normalized_count_data)[3:ncol(normalized_count_data)], 
+                             FUN=function(x){unlist(strsplit(x, 
+                                                             split = "_"))[c(1, 2)]}))
+colnames(samples) <- colnames(normalized_count_data)[3:ncol(normalized_count_data)]
+rownames(samples) <- c("condition", "sample")
+samples <- data.frame(t(samples))
+
+samples$condition[which(grepl("^SCZ", samples$condition))] <- "DISEASE"
+
+# create the design matrix
+model_design <- model.matrix(~samples$condition)
+
+
+# create a matrix containing only the numerical expression data, this time without the Bipolar samples
+expression_matrix <- normalized_count_data[,3:ncol(normalized_count_data)]
+rownames(expression_matrix) <- normalized_count_data$ensembl_gene_id
+colnames(expression_matrix) <- colnames(normalized_count_data[, 3:ncol(normalized_count_data)])
+
+# convert the expression matrix to a DGEList object so that the data can be used in further analyses using edgeR functions
+# group by experimental condition (control vs disease)
+d <- edgeR::DGEList(counts = expression_matrix, group = samples$condition)
+# calculate dispersion
+disp <- edgeR::estimateDisp(d, model_design)
+# fit a Quasi-likelihood negative binomial model to count data
+ql_fit <- edgeR::glmQLFit(disp, model_design)
+# use Quasi-likelihood method to calculate differential expression
+qlf_ctrl_vs_dis <- edgeR::glmQLFTest(ql_fit, coef='samples$conditionDISEASE')
+# extract the most differentially expressed genes, sorted by p-value
+qlf_output_hits <- edgeR::topTags(qlf_ctrl_vs_dis,sort.by = "PValue",
+                           n = nrow(expression_matrix))
+
+num_significant <- length(which(qlf_output_hits$table$PValue < 0.05))
+num_correct <- length(which(qlf_output_hits$table$FDR < 0.05))
+
+```
+
+### What thresholds were used and why?
+
+A p-value threshold of 0.05 was used because this is what is commonly used and results are typically considered significant. There was no need to alter this threshold because there was a reasonable number of significant genes.
+
+### Which method of multiple hypothesis testing was used and why?
+
+The Benjamini-Hochberg method was chosen as it is one of the most commonly used correction methods, yet it performs better than the Bonferonni method, which is also commonly used but considered too stringent. The Quasi-likelihood method was used to calculate differential expression within the edgeR package [@edgeR2010] because it is designed and highly recommended for Bulk RNASeq data, which is the type of data used for this study.
+
+### How many genes were significantly differentially expressed? 
+
+Number of genes significantly differentially expressed: `r num_significant`
+
+### How many genes passed correction?
+
+Number of genes that pass correction: `r num_correct`
+
+
+### Visualizing the amount of differentially expressed genes using a Volcano plot.
+
+
+```{r}
+# separate important information for the Volcano plot into a table
+qlf_model_pvalues <- data.frame(ensembl_id = rownames(qlf_output_hits$table), 
+                                qlf_pvalue = qlf_output_hits$table$PValue,
+                                qlf_logFC = qlf_output_hits$table$logFC)
+
+# translate significance of expression values into colours
+qlf_model_pvalues$colour <- "grey"
+qlf_model_pvalues$colour[qlf_model_pvalues$qlf_pvalue < 0.05] <- "orange"
+# highlight gene of interest IGF2
+qlf_model_pvalues$colour[qlf_model_pvalues$ensembl_id=="ENSG00000167244"] <- "red"
+
+# plot the significance values against the log fold-change
+graphics::plot(x = qlf_model_pvalues$qlf_logFC,
+    y = -log(qlf_model_pvalues$qlf_pvalue,base =10),
+    col = qlf_model_pvalues$colour,
+    xlab = "log fold-change",
+    ylab = "-log p-values",
+    main="QLF Test")
+graphics::legend("topleft",legend=c("Not Significant","Significant", "IGF2"), fill=c("grey","orange", "red"),cex = 0.7)
+
+```
+
+Figure 2. Volcano plot showing the proportion of differential expression across all genes in the dataset. The orange points represent genes that are significantly differentially expressed, the rest of the genes are represented by grey points, and the gene of interest, IGF2, is shown in red. This demonstrates the relationship between the amount of change from the control samples to the disease samples, and the significance of this change. It is clear that the gene of interest does not fall into the pool of differentially expressed genes. 
+
+
+### Visualizing the top hits using a heatmap. Do the conditions cluster together?
+
+In order to easily visualize the top differentially expressed genes, and whether they are upregulated or downregulated in the disease samples, a heatmap was constructed using the pheatmap package [@pheatmap2019].
+
+```{r}
+# install pheatmap package if not already installed
+if (!require("pheatmap", quietly = TRUE)){
+  install.packages("pheatmap")
+}
+
+library(pheatmap)
+
+# get gene names of genes that pass significance
+top_hits <- rownames(qlf_output_hits$table)[qlf_output_hits$table$PValue < 0.05] 
+# create matrix of expression values for genes that pass significance
+heatmap_matrix_tophits <- t(scale(t(expression_matrix[which(rownames(expression_matrix) %in% top_hits),]))) 
+# separate the control columns from the disease columns
+heatmap_matrix_tophits<- heatmap_matrix_tophits[,c(grep(colnames(heatmap_matrix_tophits),pattern = "^CTRL"),
+                                                   grep(colnames(heatmap_matrix_tophits),pattern = "^SCZ"))]
+# construct heatmap without clustering columns to show the division between control and disease
+tophits_pheatmap <- pheatmap::pheatmap(heatmap_matrix_tophits, cluster_cols = FALSE, show_rownames = FALSE)
+
+
+```
+
+Figure 3. Heatmap showing the difference in expression across significantly differentially expressed genes in control samples (beginning with CTRL) and disease samples (beginning with SCZ). The colour gradient represents the range of expression change. The red bars represent upregulated genes, the blue bars represent downregulated genes, and yellow represents no change in expression. On the left is a dendogram exhibiting the hierarchical clustering of genes.
+
+
+Although it is weak, there is a signal in this heatmap. In general, the bottom half of genes are clearly downregulated in disease, whereas the top half of genes are slightly more upregulated in disease. The strongest signal is shown in sample SCZ_27 where there is evident upregulation in the top few genes and clear downregulation in the bottom half. In contrast, the strongest signal from the control samples are in CTRL_33 and CTRL_10. They both show strong upregulation in the bottom half of genes, and CTRL_10 also shows consistent downregulation in the top half of genes.
+
+
+## Thresholded Over-Representation Analysis
+
+In order to perform an over-representation analysis, a list of significantly differentially expressed genes was gathered. Additionally, this was divided up into two lists, a list of significantly upregulated and significantly downregulated genes. Then, these lists were added to text files for future retrieval.
+
+```{r}
+
+# merge gene names with the top hits in order to retrieve the HUGO symbols
+qlf_output_hits_withgn <- merge(normalized_count_data[,1:2],qlf_output_hits, by.x=1, by.y = 0)
+
+# create list of upregulated genes, where p-value < 0.05 and logFC is positive
+upregulated_genes <- qlf_output_hits_withgn$hgnc_symbol[
+  which(qlf_output_hits_withgn$PValue < 0.05 
+        & qlf_output_hits_withgn$logFC > 0)]
+
+# create list of downregulated genes, where p-value < 0.05 and logFC is negative
+downregulated_genes <- qlf_output_hits_withgn$hgnc_symbol[
+  which(qlf_output_hits_withgn$PValue < 0.05 
+        & qlf_output_hits_withgn$logFC < 0)]
+
+# create list of all differentially expressed genes
+all_diff_expr <- c(upregulated_genes, downregulated_genes)
+
+# write the three lists to text files
+write.table(upregulated_genes,
+            file=file.path("./upregulated_genes.txt"),sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+write.table(downregulated_genes,
+            file=file.path("./downregulated_genes.txt"),sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+write.table(all_diff_expr,
+            file=file.path("./all_diff_expr.txt"),sep = "\t",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+```
+
+Next, these gene lists were input to G:profiler, a thresholded gene set enrichment analysis tool, to get an idea about the role that this set of differentially expressed genes plays in an organism.
+
+These genes were copied from the lists, then pasted into the query box in [G:profiler functional profiling](https://biit.cs.ut.ee/gprofiler/gost) [@raudvere2019g]. The significance threshold was changed to Benjamini-Hochberg in order to correct for multiple hypothesis testing, since there are multiple pathways. However, the Bonferroni correction method was not chosen because it is too stringent. The following data sources were then selected: GO biological pathways, Reactome, and WikiPathways. These data sources were chosen because the goal of this exploration is to find out what kinds of biological pathways and processes the significantly upregulated and downregulated genes are involved in or associated with. KEGG was not chosen as a data source because it returns many results that are not very useful and because it is not freely available. Next, "Run Query" was clicked, and once the results were loaded, the term size was set to a maximum of 200. This was done to ensure that very large and vague terms would not be displayed as they are not very informative, instead, only the more specific functions and pathways would be displayed.
+
+
+### Which method of ORA was chosen and why?
+
+A thresholded ORA was done because the genes with the strongest signals were predicted to be the most important, as well as the fact that it yields results quickly using the many online tools. One of these tools is G:profiler which was chosen for this analysis because it is updated on a regular basis, it uses several gene sets, it is fast and easy to use, and it gets many of its annotations from Ensembl.
+
+
+### What annotation data was used and why? What version of the annotation is being used?
+
+* GO biological process
+* Reactome
+* WikiPathways
+
+Version: e108_eg55_p17_0254fbf
+
+
+### How many genesets were returned with what thresholds?
+
+A p-value threshold of 0.05 was used for all of the following analyses.
+
+All differentially expressed genes:
+
+* GO biological process: 169
+* Reactome: 1
+* WikiPathways: 2
+
+Upregulated genes:
+
+* GO biological process: 42
+* Reactome: 1
+* WikiPathways: 7
+
+Downregulated genes:
+
+* GO biological process: 141
+* Reactome: 17
+* WikiPathways: 2
+
+### How does the analysis on the up-regulated and down-regulated set of genes compare to using the whole list (all differentially expressed genes together)?
+
+The results of the analysis of all differentially expressed genes showed pathways mostly related to exocytosis and apoptosis (Fig. 4). There were also terms from all sources relating to complement activation (Fig. 4, 5, 6) which is a cascade that is part of the immune system that enhances phagocytosis, a type of endocytosis [@janeway2001complement]. The Reactome source also provided the term "Activation of C3 and C5" (Fig. 5), which are events in the complement cascade [@janeway2001complement].
+
+The upregulated and downregulated set of genes, on the other hand, are found in more specific pathways. The upregulated genes showed more neural-specific functions, such as "Complement system in neuronal development and plasticity" (Fig. 10). Additionally, one of the top terms in the GO bp analysis is "synapse pruning" (Fig. 9). The downregulated genes had many terms relating to circadian regulation and exocytosis. Furthermore, GO bp and WikiPathways provide evidence of functions in the Corticotropin-releasing hormone  signaling pathway (or CRH, a peptide expressed in neurons of the hypothalamus)(Fig. 7, 8). It's important to note that in the set of downregulated genes, the top terms did not include terms that were seen in the upregulated genes, such as synapse pruning.
+
+
+![Figure 4. GO biological process annotation of all differentially expressed genes.](./images/all_GObp.png)
+
+
+![Figure 5. Reactome annotation of all differentially expressed genes.](./images/all_reactome.png)
+
+
+![Figure 6. WikiPathway annotation of all differentially expressed genes.](./images/all_WP.png)
+
+
+![Figure 7. GO biological process annotation of downregulated genes.](./images/downreg_GObp.png)
+
+
+![Figure 8. Reactome annotation of downregulated genes.](./images/downreg_reactome.png)
+
+
+![Figure 9. GO biological process annotation of upregulated genes.](./images/upreg_GObp.png)
+
+
+![Figure 10. WikiPathways annotation of upregulated genes.](./images/upreg_WP.png)
+
+
+# Discussion
+
+
+### Do the over-representation results support conclusions or mechanism discussed in the original paper? Show evidence to support the results.
+
+The genes that were found to be significantly downregulated were mostly involved in circadian regulation. Additionally, there were results from WikiPathways and GO bp that show relation to the Corticotropin-releasing hormone (CRH) signaling pathway. CRH is a protein that is expressed in CRH neurons in certain parts of the brain. The activity of these neurons is affected by circadian variations and differs in resting versus stress conditions [@subbannayya2013integrated]. There is no evidence in the original paper that related the circadian clock to psychotic symptoms.
+
+The upregulation of genes involved in synapse pruning, obtained from the G:profiler analysis, is consistent with the the predictions in the study done by Pai et al. Their study found that there is a loss of volume in the prefrontal cortex in patients who develop psychosis. In the brain, IGF2 promotes synapse development, among other things, proving that normal IGF2 activity is needed for normal neuron structure [@pai2019differential]. Pai et al.'s paper also mentioned the CommonMind Consortium RNA-sequencing study [@fromer2016gene] which found that IGF2 was the top downregulated gene in the prefrontal cortex of schizophrenia patients. Their results suggest that irregular epigenetic regulation of IGF2 can contribute to dopamine-mediated psychotic symptoms and synaptic structural deficits in major psychosis [@pai2019differential]. It is possible that the upregulated genes, in the disease samples, obtained in this investigation contribute to the improper formation of synapses which may be a cause of psychotic symptoms in Schizophrenia patients. Where the results of this study do not align with the original paper is that IGF2 was not found to be significantly downregulated with the parameters used.
+
+Another two important terms that came up for the upregulated genes are "complement mediated synapse pruning" as well as "complement system in neuronal development and plasticity". The complement system works to enhance phagocytosis, and, in a study done by Gomez-Arboledas et al., it was shown that initial activation components of the complement cascade play a key role in the refinement of synaptic circuits. Excessive synaptic pruning can be detrimental and lead to synaptic loss. Since, the complement system plays a role in synaptic pruning, it was revealed that it contributes to neurodegeneration and cognitive deficits [@gomez2021role]. This aligns with the results obtained in the G:profiler analysis because the set of genes involved in complement mediated synapse pruning are upregulated which could cause excessive synpatic pruning and lead to cognitive deficits, as per Gomez-Arboledas et al.'s study.
+
+
+## References
+
